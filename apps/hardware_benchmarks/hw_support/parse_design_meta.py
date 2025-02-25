@@ -53,6 +53,9 @@ def setOrCheck(json, key, value):
 def parseDesignTop(meta, filename: str):
     meta["testing"]["coreir"] = os.path.basename(filename)
 
+    metaIn = []
+    metaMU_in = [] 
+    metaOut = []
     with open(filename, "r") as readFile:
         designTop = json.load(readFile)
         topName = designTop["top"]
@@ -64,7 +67,21 @@ def parseDesignTop(meta, filename: str):
 
         dense_ready_valid = "DENSE_READY_VALID" in os.environ and os.environ.get("DENSE_READY_VALID") == "1" 
         for inst in coreirInstances:
-            if inst.startswith("io16in_"):
+            if inst.startswith("MU"):    
+                # this is a MU input
+                ioName = findBetween(inst, "MU_io16in_", "_clkwrk")
+                metaMU_in = findIO(meta["IOs"]["mu_inputs"], ioName)
+
+
+                if "mu_io_tiles" in metaMU_in:
+                    metaMU_in["mu_io_tiles"].append({"name":inst})
+                else:
+                    metaMU_in["mu_io_tiles"] = [{"name":inst}]
+
+                # # change read_data_stride based on the number of input tiles
+                # metaIn["io_tiles"]
+            
+            elif inst.startswith("io16in_"):
                 # this is a data input
                 ioName = findBetween(inst, "io16in_", "_clkwrk")
                 addr = coreirInstances[inst]["metadata"]["glb2out_0"]
@@ -98,20 +115,21 @@ def parseDesignTop(meta, filename: str):
 
         # alter the shape and data stride
         for input_struct in meta["IOs"]["inputs"]:
-            num_tiles = len(input_struct["io_tiles"])
-            # change the shape
-            if num_tiles > 1 and input_struct["shape"][0] is not num_tiles:
-                new_shape = input_struct["shape"]
-                partial_unroll = num_tiles
-                # remove dimensions that are fully unrolled
-                while partial_unroll >= new_shape[0]:
-                    assert(partial_unroll % new_shape[0] == 0), f"input shape has inner dim {new_shape[0]} and trying to unroll {partial_unroll}"
-                    partial_unroll //= new_shape[0]
-                    new_shape.pop(0)
-                assert(new_shape[0] % partial_unroll == 0), f"input shape has inner dim {new_shape[0]} and trying to unroll {num_tiles}"
-                new_shape.insert(0,num_tiles)
-                new_shape[1] //= partial_unroll
-                input_struct["shape"] = new_shape
+            if "io_tiles" in input_struct:
+                num_tiles = len(input_struct["io_tiles"])
+                # change the shape
+                if num_tiles > 1 and input_struct["shape"][0] is not num_tiles:
+                    new_shape = input_struct["shape"]
+                    partial_unroll = num_tiles
+                    # remove dimensions that are fully unrolled
+                    while partial_unroll >= new_shape[0]:
+                        assert(partial_unroll % new_shape[0] == 0), f"input shape has inner dim {new_shape[0]} and trying to unroll {partial_unroll}"
+                        partial_unroll //= new_shape[0]
+                        new_shape.pop(0)
+                    assert(new_shape[0] % partial_unroll == 0), f"input shape has inner dim {new_shape[0]} and trying to unroll {num_tiles}"
+                    new_shape.insert(0,num_tiles)
+                    new_shape[1] //= partial_unroll
+                    input_struct["shape"] = new_shape
 
         for output_struct in meta["IOs"]["outputs"]:
             num_tiles = len(output_struct["io_tiles"])
@@ -130,7 +148,11 @@ def parseDesignTop(meta, filename: str):
                 output_struct["shape"] = new_shape
 
         # sort the inputs and outputs based on human sorting
-        metaIn["io_tiles"].sort(key=lambda x: natural_keys(x["name"]))
+        if "mu_io_tiles" in metaMU_in:
+            metaMU_in["mu_io_tiles"].sort(key=lambda x: natural_keys(x["name"]))
+
+        if "io_tiles" in metaIn:
+            metaIn["io_tiles"].sort(key=lambda x: natural_keys(x["name"]))
         metaOut["io_tiles"].sort(key=lambda x: natural_keys(x["name"]))
 
 
@@ -167,6 +189,15 @@ def parseDesignPlace(meta, filename: str):
                 setOrCheck(tileOut, "x_pos", int(words[1]))
                 setOrCheck(tileOut, "y_pos", int(words[2]))
                 tileOut["valid_name"] = validName
+
+
+            elif ("\t#U" in line) and name.startswith("MU_io16in_"):
+                assert len(words) == 4
+                ioName = findBetween(name, "MU_io16in_", "_clkwrk")
+                metaOut = findIO(meta["IOs"]["mu_inputs"], ioName)
+                tileOut = findIO(metaOut["mu_io_tiles"], name)
+                setOrCheck(tileOut, "x_pos", int(words[1]))
+                setOrCheck(tileOut, "y_pos", int(words[2])) 
 
 # Hacky functions to tile xy loop when flattened and add padding to extents
 def parseLoopExtentforPadding(meta, halide_gen_args):
@@ -249,12 +280,11 @@ def E64_packing(json_data):
     trimmed_outputs = []
     
     # Assert that the number of inputs and outputs are multiples of 4
-    assert len(json_data["IOs"]["inputs"][0]["io_tiles"]) % 4 == 0, "Number of inputs must be a multiple of 4 for E64 mode"
-    assert len(json_data["IOs"]["outputs"][0]["io_tiles"]) % 4 == 0, "Number of outputs must be a multiple of 4 for E64 mode"
-    
+    # FIXME: Potentially fix this for apps with two loop levels 
     def process_io(io_entries, unique_positions):
         trimmed_entries = []
         for entry in io_entries:
+            assert len(entry["io_tiles"]) % 4 == 0, "Number of io_tiles must be a multiple of 4 for E64 mode"
             new_io_tiles = []
             for tile in entry["io_tiles"]:
                 position = (tile["x_pos"], tile["y_pos"])
@@ -263,7 +293,8 @@ def E64_packing(json_data):
                     
                     # Multiply each element in extent by 4
                     if "addr" in tile and "extent" in tile["addr"]:
-                        tile["addr"]["extent"] = [x * 4 for x in tile["addr"]["extent"]]
+                        # tile["addr"]["extent"] = [x * 4 for x in tile["addr"]["extent"]]
+                        tile["addr"]["extent"][0] = tile["addr"]["extent"][0] * 4
                     else:
                         print("ERROR: addr or extent not found in tile. Confirm that deisgn_top.json and design.place are correct for E64 mode. (Hint: Is unroll a multiple of 4?)")
                         sys.exit(1)

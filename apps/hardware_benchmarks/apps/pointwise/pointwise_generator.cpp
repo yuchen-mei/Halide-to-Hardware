@@ -15,6 +15,8 @@ public:
     Output<Buffer<uint8_t>> output{"output", 2};
 
     GeneratorParam<int32_t> myunroll{"myunroll", 1};
+    GeneratorParam<int32_t> myunroll_E64{"myunroll_E64", 8};
+
   
     void generate() {
         /* THE ALGORITHM */
@@ -55,6 +57,9 @@ public:
         } else if (get_target().has_feature(Target::Clockwork)) {
           Var xi,yi, xo,yo;
 
+          const char* e64_mode_env = getenv("E64_MODE_ON");
+          const int unroll = (e64_mode_env && std::stoi(e64_mode_env) == 1) ? myunroll_E64 : myunroll;
+
           output.bound(x, 0, outImgSize);
           output.bound(y, 0, outImgSize);
           
@@ -63,14 +68,14 @@ public:
           hw_output
               .tile(x,y, xo,yo, xi,yi, outImgSize, outImgSize)
               .hw_accelerate(xi, xo);
-          hw_output.unroll(xi, myunroll);
+          hw_output.unroll(xi, unroll);
 
           mult.compute_at(hw_output, xo)
-            .unroll(x, myunroll);
+            .unroll(x, unroll);
           
           //hw_input.store_at(hw_output, xo).compute_at(hw_output, xo);
           hw_input.stream_to_accelerator();
-          hw_input.in().unroll(x, myunroll);
+          hw_input.in().unroll(x, unroll);
           //input_copy.compute_root();
           
         } else {
